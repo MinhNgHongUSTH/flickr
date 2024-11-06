@@ -1,10 +1,13 @@
 package vn.edu.usth.flickr1;
 
+import android.app.Activity;
 import android.app.ProgressDialog;
 import android.content.ContentResolver;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.MediaStore;
+import android.util.Log;
 import android.view.View;
 import android.webkit.MimeTypeMap;
 import android.widget.EditText;
@@ -12,10 +15,15 @@ import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.canhub.cropper.CropImageContract;
+import com.canhub.cropper.CropImageContractOptions;
+import com.canhub.cropper.CropImageOptions;
+import com.canhub.cropper.CropImageView;
 import com.google.android.gms.tasks.Continuation;
 import com.google.android.gms.tasks.OnCompleteListener;
 import com.google.android.gms.tasks.OnFailureListener;
@@ -26,11 +34,11 @@ import com.google.firebase.database.FirebaseDatabase;
 import com.google.firebase.storage.FirebaseStorage;
 import com.google.firebase.storage.StorageReference;
 import com.google.firebase.storage.StorageTask;
+import com.google.firebase.storage.UploadTask;
 
 import java.util.HashMap;
 
 public class PostActivity extends AppCompatActivity {
-
     Uri imageUri;
     String myUrl = "";
     StorageTask uploadTask;
@@ -39,6 +47,27 @@ public class PostActivity extends AppCompatActivity {
     ImageView close, image_added;
     TextView post;
     EditText description;
+    private CropImageOptions options;
+
+    private final ActivityResultLauncher<CropImageContractOptions> cropImageLauncher =
+            registerForActivityResult(new CropImageContract(), result -> {
+                if (result.isSuccessful() && result.getUriContent() != null) {
+                    imageUri = result.getUriContent();
+                    image_added.setImageURI(imageUri);  // Display the cropped image
+                } else {
+                    Toast.makeText(PostActivity.this, "Image cropping failed!", Toast.LENGTH_SHORT).show();
+                }
+            });
+
+    private final ActivityResultLauncher<Intent> pickImageLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
+                    Uri selectedImageUri = result.getData().getData();
+                    if (selectedImageUri != null) {
+                        cropImageLauncher.launch(new CropImageContractOptions(selectedImageUri, options));
+                    }
+                }
+            });
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -52,76 +81,69 @@ public class PostActivity extends AppCompatActivity {
 
         storageReference = FirebaseStorage.getInstance().getReference("posts");
 
-        // Close the post activity
-        close.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                startActivity(new Intent(PostActivity.this, MainActivity.class));
-                finish();
+        close.setOnClickListener(view -> {
+            startActivity(new Intent(PostActivity.this, MainActivity.class));
+            finish();
+        });
+
+        post.setOnClickListener(view -> {
+            if (imageUri != null) {
+                uploadImage();
+            } else {
+                Toast.makeText(PostActivity.this, "No Image Selected!", Toast.LENGTH_SHORT).show();
             }
         });
 
-        // Start image selection when user clicks on image_added ImageView
-        image_added.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                openImagePicker();
-            }
-        });
+        options = new CropImageOptions();
+        options.guidelines = CropImageView.Guidelines.ON;
+        options.aspectRatioX = 1;
+        options.aspectRatioY = 1;
+        options.fixAspectRatio = true;
 
-        // Upload the post when user clicks the post button
-        post.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                if (imageUri != null) {
-                    uploadImage();
-                } else {
-                    Toast.makeText(PostActivity.this, "No Image Selected!", Toast.LENGTH_SHORT).show();
-                }
-            }
-        });
+        image_added.setOnClickListener(view -> openGallery());
     }
 
-    // Open the image picker to select an image from the gallery
-    private void openImagePicker() {
-        Intent intent = new Intent(Intent.ACTION_PICK);
-        intent.setType("image/*");
-        startActivityForResult(intent, 1000); // 1000 is the request code
+    private void openGallery() {
+        Intent intent = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
+        pickImageLauncher.launch(intent);
     }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-
-        if (requestCode == 1000 && resultCode == RESULT_OK && data != null) {
-            imageUri = data.getData();  // Get the selected image URI
-            image_added.setImageURI(imageUri); // Display the selected image in ImageView
-        } else {
-            Toast.makeText(this, "No image selected", Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    // Get the file extension from the URI
     private String getFileExtension(Uri uri) {
         ContentResolver contentResolver = getContentResolver();
         MimeTypeMap mime = MimeTypeMap.getSingleton();
-        return mime.getExtensionFromMimeType(contentResolver.getType(uri));
+        String extension = mime.getExtensionFromMimeType(contentResolver.getType(uri));
+
+        if (extension == null) {
+            Log.e("UploadImage", "Failed to get file extension");
+        } else {
+            Log.d("UploadImage", "File extension: " + extension);
+        }
+        return extension;
     }
 
-    // Upload the image to Firebase Storage
     private void uploadImage() {
         ProgressDialog progressDialog = new ProgressDialog(this);
-        progressDialog.setMessage("Posting");
+        progressDialog.setMessage("Posting...");
         progressDialog.show();
 
         if (imageUri != null) {
-            StorageReference fileReference = storageReference.child(System.currentTimeMillis() + "." + getFileExtension(imageUri));
-            uploadTask = fileReference.putFile(imageUri);
+            Log.d("UploadImage", "Image URI for upload: " + imageUri.toString());
 
-            uploadTask.continueWithTask(new Continuation<Task<Uri>, Task<Uri>>() {
+            String extension = getFileExtension(imageUri);
+            if (extension == null) {
+                progressDialog.dismiss();
+                Toast.makeText(this, "Failed to determine file type!", Toast.LENGTH_SHORT).show();
+                return;
+            }
+
+            StorageReference fileReference = storageReference.child(System.currentTimeMillis() + "." + extension);
+
+            uploadTask = fileReference.putFile(imageUri);
+            uploadTask.continueWithTask(new Continuation<UploadTask.TaskSnapshot, Task<Uri>>() {
                 @Override
-                public Task<Uri> then(@NonNull Task<Task<Uri>> task) throws Exception {
+                public Task<Uri> then(@NonNull Task<UploadTask.TaskSnapshot> task) throws Exception {
                     if (!task.isSuccessful()) {
+                        Log.e("UploadImage", "Upload failed", task.getException());
                         throw task.getException();
                     }
                     return fileReference.getDownloadUrl();
@@ -132,8 +154,8 @@ public class PostActivity extends AppCompatActivity {
                     if (task.isSuccessful()) {
                         Uri downloadUri = task.getResult();
                         myUrl = downloadUri.toString();
+                        Log.d("UploadImage", "Download URL: " + myUrl);
 
-                        // Save post details to Firebase Database
                         DatabaseReference reference = FirebaseDatabase.getInstance().getReference("Posts");
                         String postId = reference.push().getKey();
 
@@ -143,25 +165,33 @@ public class PostActivity extends AppCompatActivity {
                         hashMap.put("description", description.getText().toString());
                         hashMap.put("publisher", FirebaseAuth.getInstance().getCurrentUser().getUid());
 
-                        reference.child(postId).setValue(hashMap);
-                        progressDialog.dismiss();
-
-                        startActivity(new Intent(PostActivity.this, MainActivity.class));
-                        finish();
+                        reference.child(postId).setValue(hashMap).addOnCompleteListener(task1 -> {
+                            progressDialog.dismiss();
+                            if (task1.isSuccessful()) {
+                                startActivity(new Intent(PostActivity.this, MainActivity.class));
+                                finish();
+                            } else {
+                                Log.e("UploadImage", "Failed to save post details");
+                                Toast.makeText(PostActivity.this, "Failed to save post details!", Toast.LENGTH_SHORT).show();
+                            }
+                        });
                     } else {
                         progressDialog.dismiss();
-                        Toast.makeText(PostActivity.this, "Failed!", Toast.LENGTH_SHORT).show();
+                        Log.e("UploadImage", "Failed to retrieve download URL");
+                        Toast.makeText(PostActivity.this, "Failed to upload image!", Toast.LENGTH_SHORT).show();
                     }
                 }
             }).addOnFailureListener(new OnFailureListener() {
                 @Override
                 public void onFailure(@NonNull Exception e) {
                     progressDialog.dismiss();
+                    Log.e("UploadImage", "Upload failed with exception: " + e.getMessage());
                     Toast.makeText(PostActivity.this, e.getMessage(), Toast.LENGTH_SHORT).show();
                 }
             });
         } else {
             progressDialog.dismiss();
+            Log.e("UploadImage", "No Image Selected!");
             Toast.makeText(this, "No Image Selected!", Toast.LENGTH_SHORT).show();
         }
     }
